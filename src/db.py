@@ -85,6 +85,11 @@ def create_tables(db_path: DatabasePath) -> None:
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (signal_id) REFERENCES signals (id)
                 );
+
+                CREATE TABLE IF NOT EXISTS daily_reports (
+                    date TEXT PRIMARY KEY,
+                    text TEXT NOT NULL
+                );
                 """
             )
             outcome_columns = {
@@ -186,6 +191,18 @@ def fetch_order(
             (client_order_id,),
         ).fetchone()
     return dict(row) if row is not None else None
+
+
+def save_daily_report(db_path: DatabasePath, report_date: str, text: str) -> None:
+    with closing(_connect(db_path)) as connection:
+        with connection:
+            connection.execute(
+                """
+                INSERT INTO daily_reports (date, text) VALUES (?, ?)
+                ON CONFLICT (date) DO UPDATE SET text = excluded.text
+                """,
+                (report_date, text),
+            )
 
 
 def fetch_signals(

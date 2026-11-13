@@ -28,7 +28,14 @@ def test_create_tables_is_idempotent(tmp_path):
             )
         }
 
-    assert {"raw_items", "signals", "outcomes", "risk_events", "orders"} <= tables
+    assert {
+        "raw_items",
+        "signals",
+        "outcomes",
+        "risk_events",
+        "orders",
+        "daily_reports",
+    } <= tables
 
 
 def test_insert_and_fetch_signal_including_hold(tmp_path):

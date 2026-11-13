@@ -36,6 +36,10 @@ class CsvPriceProvider:
         for prices in self._prices.values():
             prices.sort(key=lambda quote: quote[0])
 
+    @property
+    def latest_timestamp(self) -> datetime | None:
+        return max((quotes[-1][0] for quotes in self._prices.values() if quotes), default=None)
+
     def get_price(self, symbol: str, when: datetime) -> float | None:
         if when.tzinfo is None or when.utcoffset() is None:
             raise ValueError("when must be a timezone-aware datetime")
