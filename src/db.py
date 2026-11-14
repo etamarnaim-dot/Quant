@@ -31,7 +31,26 @@ def create_tables(db_path: DatabasePath) -> None:
                     id INTEGER PRIMARY KEY,
                     source TEXT NOT NULL,
                     fetched_at TEXT NOT NULL,
-                    text TEXT NOT NULL
+                    text TEXT NOT NULL,
+                    title TEXT,
+                    url TEXT,
+                    published_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS news_events (
+                    id INTEGER PRIMARY KEY,
+                    item_id INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    sentiment REAL NOT NULL CHECK (sentiment BETWEEN 0 AND 1),
+                    relevance_score REAL NOT NULL CHECK (relevance_score BETWEEN 0 AND 1),
+                    quality_score REAL NOT NULL CHECK (quality_score BETWEEN 0 AND 1),
+                    source TEXT NOT NULL,
+                    published_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (item_id) REFERENCES raw_items (id)
                 );
 
                 CREATE TABLE IF NOT EXISTS signals (
@@ -100,6 +119,17 @@ def create_tables(db_path: DatabasePath) -> None:
                     "ALTER TABLE outcomes ADD COLUMN no_trade INTEGER NOT NULL "
                     "DEFAULT 0 CHECK (no_trade IN (0, 1))"
                 )
+
+            raw_columns = {row["name"] for row in connection.execute("PRAGMA table_info(raw_items)")}
+            for column_name, column_type in {
+                "title": "TEXT",
+                "url": "TEXT",
+                "published_at": "TEXT",
+            }.items():
+                if column_name not in raw_columns:
+                    connection.execute(
+                        f"ALTER TABLE raw_items ADD COLUMN {column_name} {column_type}"
+                    )
 
 
 def insert_signal(
@@ -203,6 +233,85 @@ def save_daily_report(db_path: DatabasePath, report_date: str, text: str) -> Non
                 """,
                 (report_date, text),
             )
+
+
+def insert_raw_item(
+    db_path: DatabasePath,
+    *,
+    source: str,
+    fetched_at: str,
+    text: str,
+    title: str | None = None,
+    url: str | None = None,
+    published_at: str | None = None,
+) -> int:
+    with closing(_connect(db_path)) as connection:
+        with connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO raw_items (source, fetched_at, text, title, url, published_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source,
+                    fetched_at,
+                    text,
+                    title,
+                    url,
+                    published_at,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+
+def fetch_news_events(db_path: DatabasePath, *, limit: int | None = None) -> list[dict[str, object]]:
+    query = "SELECT * FROM news_events ORDER BY created_at DESC, id DESC"
+    parameters: tuple[object, ...] = ()
+    if limit is not None:
+        query += " LIMIT ?"
+        parameters = (limit,)
+    with closing(_connect(db_path)) as connection:
+        rows = connection.execute(query, parameters).fetchall()
+    return [dict(row) for row in rows]
+
+
+def insert_news_event(
+    db_path: DatabasePath,
+    *,
+    item_id: int,
+    symbol: str,
+    title: str,
+    summary: str,
+    event_type: str,
+    sentiment: float,
+    relevance_score: float,
+    quality_score: float,
+    source: str,
+    published_at: str | None = None,
+) -> int:
+    with closing(_connect(db_path)) as connection:
+        with connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO news_events (
+                    item_id, symbol, title, summary, event_type,
+                    sentiment, relevance_score, quality_score, source, published_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item_id,
+                    symbol,
+                    title,
+                    summary,
+                    event_type,
+                    sentiment,
+                    relevance_score,
+                    quality_score,
+                    source,
+                    published_at,
+                ),
+            )
+            return int(cursor.lastrowid)
 
 
 def fetch_signals(

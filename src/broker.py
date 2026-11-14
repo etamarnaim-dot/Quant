@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Callable, Protocol
 
 from .prices import PriceProvider
@@ -51,6 +51,7 @@ class SimBroker:
         self._clock = clock
         self._cash = 10_000.0
         self._day_start_equity = 10_000.0
+        self._day_start_equity_date: date | None = None
         self._positions: dict[str, int] = {}
         self._orders: dict[str, SimOrder] = {}
 
@@ -69,6 +70,10 @@ class SimBroker:
                 raise ValueError(f"no valid price available for held symbol {symbol}")
             positions[symbol] = qty * price
         equity = self._cash + sum(positions.values())
+        current_day = now.date()
+        if self._day_start_equity_date != current_day:
+            self._day_start_equity = equity
+            self._day_start_equity_date = current_day
         return AccountState(
             equity=equity,
             day_start_equity=self._day_start_equity,

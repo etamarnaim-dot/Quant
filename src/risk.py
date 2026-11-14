@@ -17,7 +17,15 @@ class RiskConfig:
     allow_short: bool = False
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "symbol_whitelist", frozenset(self.symbol_whitelist))
+        if isinstance(self.symbol_whitelist, str):
+            raise ValueError("symbol_whitelist must be an iterable of non-empty symbol strings")
+        try:
+            symbols = tuple(self.symbol_whitelist)
+        except TypeError as exc:
+            raise ValueError("symbol_whitelist must be an iterable of non-empty symbol strings") from exc
+        if any(not isinstance(symbol, str) or not symbol.strip() for symbol in symbols):
+            raise ValueError("symbol_whitelist must contain non-empty symbol strings")
+        object.__setattr__(self, "symbol_whitelist", frozenset(symbol.strip() for symbol in symbols))
 
 
 @dataclass

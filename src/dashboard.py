@@ -12,6 +12,7 @@ from src.dashboard_data import (
     resolved_outcomes,
     risk_events,
     signal_counts,
+    strategy_rankings,
 )
 
 
@@ -38,6 +39,9 @@ st.subheader("Signals")
 st.dataframe(latest_signals(DEFAULT_DB_PATH), hide_index=True, use_container_width=True)
 st.subheader("Signal counts")
 st.dataframe(signal_counts(DEFAULT_DB_PATH), hide_index=True, use_container_width=True)
+
+st.subheader("Strategy leaderboard")
+st.dataframe(strategy_rankings(DEFAULT_DB_PATH), hide_index=True, use_container_width=True)
 
 st.subheader("Orders")
 st.dataframe(orders(DEFAULT_DB_PATH), hide_index=True, use_container_width=True)

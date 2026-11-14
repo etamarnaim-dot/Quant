@@ -35,6 +35,16 @@ OUTCOME_COLUMNS = [
 CONFIDENCE_COLUMNS = [
     "signal", "confidence_bucket", "resolved_count", "average_return", "hit_rate", "summary",
 ]
+STRATEGY_RANKING_COLUMNS = [
+    "model_name",
+    "signal_count",
+    "buy_count",
+    "sell_count",
+    "hold_count",
+    "average_confidence",
+    "average_return",
+    "win_rate",
+]
 DAILY_REPORT_COLUMNS = ["date", "text"]
 
 
@@ -146,6 +156,28 @@ def latest_daily_report(db_path: str | Path = DEFAULT_DB_PATH) -> pd.DataFrame:
         db_path,
         "SELECT date, text FROM daily_reports ORDER BY date DESC LIMIT 1",
         DAILY_REPORT_COLUMNS,
+    )
+
+
+def strategy_rankings(db_path: str | Path = DEFAULT_DB_PATH) -> pd.DataFrame:
+    return _query_frame(
+        db_path,
+        """
+        SELECT
+            s.model_name,
+            COUNT(*) AS signal_count,
+            SUM(CASE WHEN s.signal = 'BUY' THEN 1 ELSE 0 END) AS buy_count,
+            SUM(CASE WHEN s.signal = 'SELL' THEN 1 ELSE 0 END) AS sell_count,
+            SUM(CASE WHEN s.signal = 'HOLD' THEN 1 ELSE 0 END) AS hold_count,
+            AVG(s.confidence) AS average_confidence,
+            AVG(CASE WHEN o.return_pct IS NULL THEN NULL ELSE o.return_pct END) AS average_return,
+            AVG(CASE WHEN o.return_pct IS NOT NULL AND o.return_pct > 0 THEN 1.0 ELSE 0.0 END) AS win_rate
+        FROM signals AS s
+        LEFT JOIN outcomes AS o ON o.signal_id = s.id
+        GROUP BY s.model_name
+        ORDER BY signal_count DESC, average_confidence DESC
+        """,
+        STRATEGY_RANKING_COLUMNS,
     )
 
 
