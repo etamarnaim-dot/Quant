@@ -68,6 +68,21 @@ def test_csv_provider_never_looks_ahead(tmp_path):
     assert provider.get_price("ACME", SIGNAL_TIME + timedelta(minutes=1)) == 105.0
 
 
+def test_csv_get_quote_never_returns_a_quote_after_when(tmp_path):
+    provider = _provider(
+        tmp_path,
+        [
+            (SIGNAL_TIME, "ACME", 100.0),
+            (SIGNAL_TIME + timedelta(minutes=1), "ACME", 105.0),
+        ],
+    )
+
+    quote = provider.get_quote("ACME", SIGNAL_TIME + timedelta(seconds=30))
+
+    assert quote.price == 100.0
+    assert quote.timestamp == SIGNAL_TIME
+
+
 def test_horizon_that_has_not_elapsed_is_not_recorded(tmp_path):
     db_path = _database(tmp_path)
     _insert_signal(db_path)

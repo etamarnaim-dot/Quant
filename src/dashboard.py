@@ -2,8 +2,10 @@ from collections import Counter
 
 import streamlit as st
 
+from src.backtest import walk_forward_backtest
 from src.dashboard_data import (
     DEFAULT_DB_PATH,
+    DEFAULT_PRICE_PATH,
     confidence_bucket_summary,
     health,
     latest_daily_report,
@@ -12,7 +14,9 @@ from src.dashboard_data import (
     resolved_outcomes,
     risk_events,
     signal_counts,
+    strategy_rankings,
 )
+from src.market_data import volatility_rankings
 
 
 st.set_page_config(page_title="Paper Trading Monitor", layout="wide")
@@ -38,6 +42,20 @@ st.subheader("Signals")
 st.dataframe(latest_signals(DEFAULT_DB_PATH), hide_index=True, use_container_width=True)
 st.subheader("Signal counts")
 st.dataframe(signal_counts(DEFAULT_DB_PATH), hide_index=True, use_container_width=True)
+
+st.subheader("Strategy leaderboard")
+st.dataframe(strategy_rankings(DEFAULT_DB_PATH), hide_index=True, use_container_width=True)
+
+st.subheader("Top fluctuating symbols")
+st.dataframe(volatility_rankings(DEFAULT_PRICE_PATH, limit=10), hide_index=True, use_container_width=True)
+
+st.subheader("Walk-forward evaluation")
+st.caption("Chronological holdout evaluation; daily horizon and 5 bps estimated cost per side.")
+st.dataframe(
+    walk_forward_backtest(DEFAULT_PRICE_PATH, horizon="1d", cost_bps=5.0),
+    hide_index=True,
+    use_container_width=True,
+)
 
 st.subheader("Orders")
 st.dataframe(orders(DEFAULT_DB_PATH), hide_index=True, use_container_width=True)
