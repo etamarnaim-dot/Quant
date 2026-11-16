@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from src.news import fetch_news_events, ingest_news_articles
 from src.news_sources import PublicFeedNewsSource, build_default_news_sources, parse_sec_atom, parse_yahoo_rss
 
@@ -129,3 +131,27 @@ def test_default_registry_registers_public_feed_for_symbols(monkeypatch):
     registry = build_default_news_sources(symbols=["ACME"])
 
     assert any(isinstance(source, PublicFeedNewsSource) for source in registry._sources)
+
+
+def test_sec_user_agent_rejects_env_example_placeholder():
+    example_path = Path(__file__).resolve().parents[1] / ".env.example"
+    example_line = next(line for line in example_path.read_text(encoding="utf-8").splitlines() if line.startswith("SEC_USER_AGENT="))
+    placeholder = example_line.partition("=")[2]
+
+    source = PublicFeedNewsSource(["ACME"], sec_user_agent=placeholder)
+
+    assert source.sec_user_agent is None
+
+
+def test_sec_user_agent_rejects_example_domains_and_placeholder_name():
+    invalid_values = (
+        "Research App user@example.com",
+        "Research App user@example.org",
+        "Research App user@example.net",
+        "Quant your.name@research.org",
+    )
+
+    assert all(
+        PublicFeedNewsSource(["ACME"], sec_user_agent=value).sec_user_agent is None
+        for value in invalid_values
+    )

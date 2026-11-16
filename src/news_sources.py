@@ -104,13 +104,27 @@ class FinnhubNewsSource(NewsSource):
         except (error.URLError, ValueError, TimeoutError):
             return []
         items: list[dict[str, object]] = []
+        configured_symbols = {str(symbol).strip().upper() for symbol in self.symbols}
         for article in payload:
             if not isinstance(article, dict):
                 continue
+            related_value = article.get("related") or ""
+            if isinstance(related_value, str):
+                related_symbols = {
+                    symbol.strip().upper()
+                    for symbol in related_value.split(",")
+                    if symbol.strip()
+                }
+            elif isinstance(related_value, (list, tuple, set)):
+                related_symbols = {str(symbol).strip().upper() for symbol in related_value if str(symbol).strip()}
+            else:
+                related_symbols = set()
+            matched_symbols = [symbol for symbol in self.symbols if str(symbol).strip().upper() in related_symbols & configured_symbols]
+            if not matched_symbols:
+                continue
             normalized = normalize_news_article(article, default_source="finnhub")
-            if self.symbols:
-                normalized["symbols"] = [str(symbol).upper() for symbol in self.symbols]
-                normalized["symbol"] = normalized["symbols"][0]
+            normalized["symbols"] = [str(symbol).strip().upper() for symbol in matched_symbols]
+            normalized["symbol"] = normalized["symbols"][0]
             items.append(normalized)
         return items
 
@@ -230,9 +244,18 @@ class PublicFeedNewsSource(NewsSource):
     ) -> None:
         self.symbols = tuple(dict.fromkeys(str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()))
         candidate_user_agent = sec_user_agent or os.getenv("SEC_USER_AGENT")
+        contact_email = email.utils.parseaddr(candidate_user_agent or "")[1].casefold()
+        email_domain = contact_email.rsplit("@", 1)[-1]
+        is_example_domain = any(
+            email_domain == domain or email_domain.endswith("." + domain)
+            for domain in ("example.com", "example.org", "example.net")
+        )
         self.sec_user_agent = (
             candidate_user_agent
-            if candidate_user_agent and "@" in candidate_user_agent and "you@example.com" not in candidate_user_agent
+            if candidate_user_agent
+            and contact_email
+            and not is_example_domain
+            and "your.name" not in candidate_user_agent.casefold()
             else None
         )
         self.timeout = timeout
