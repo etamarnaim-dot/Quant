@@ -61,3 +61,16 @@ def test_run_research_cycle_creates_signals(tmp_path):
         assert signal["signal"] in {"BUY", "SELL", "HOLD"}
         assert 0.0 <= float(signal["confidence"]) <= 1.0
         assert "model_name" in signal
+
+
+def test_repeated_same_day_cycle_does_not_duplicate_unchanged_signals(tmp_path):
+    provider = FakePriceProvider()
+    db_path = tmp_path / "research.db"
+    now = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
+    config = ResearchConfig(symbols=("ACME",), strategy_names=("momentum",), lookback_days=30)
+
+    first = run_research_cycle(db_path=db_path, price_provider=provider, config=config, now=now)
+    second = run_research_cycle(db_path=db_path, price_provider=provider, config=config, now=now)
+
+    assert first
+    assert second == []

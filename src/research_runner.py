@@ -25,6 +25,45 @@ class ResearchConfig:
     lookback_days: int = 30
 
 
+def _recent_news_context(
+    db_path: DatabasePath,
+    symbol: str,
+    now: datetime,
+) -> tuple[float, int]:
+    cutoff = now - timedelta(hours=48)
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            "SELECT sentiment, relevance_score, quality_score, published_at "
+            "FROM news_events WHERE symbol = ? AND published_at IS NOT NULL",
+            (symbol,),
+        ).fetchall()
+
+    weighted_sentiment = 0.0
+    total_weight = 0.0
+    item_count = 0
+    for sentiment, relevance, quality, published_at in rows:
+        try:
+            text = str(published_at).replace("Z", "+00:00")
+            timestamp = datetime.fromisoformat(text)
+            if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                continue
+            timestamp = timestamp.astimezone(timezone.utc)
+            if timestamp < cutoff or timestamp > now:
+                continue
+            score = max(-1.0, min(1.0, (float(sentiment) - 0.5) * 2.0))
+            weight = max(0.0, float(relevance)) * max(0.0, float(quality))
+        except (TypeError, ValueError):
+            continue
+        if weight <= 0:
+            continue
+        weighted_sentiment += score * weight
+        total_weight += weight
+        item_count += 1
+    if not total_weight:
+        return 0.0, 0
+    return weighted_sentiment / total_weight, item_count
+
+
 def _collect_history(
     price_provider: PriceProviderProtocol,
     symbol: str,
@@ -194,14 +233,47 @@ def run_research_cycle(
             signal = strategy.generator(symbol, history, resolved_now)
             if signal is None:
                 continue
-            if signal.confidence < resolved_config.min_confidence:
+            news_sentiment, news_count = _recent_news_context(db_path, symbol, resolved_now)
+            direction = 1.0 if signal.signal == "BUY" else -1.0 if signal.signal == "SELL" else 0.0
+            confidence_adjustment = max(-0.1, min(0.1, news_sentiment * direction * 0.1))
+            adjusted_confidence = max(0.0, min(1.0, signal.confidence + confidence_adjustment))
+            if adjusted_confidence < resolved_config.min_confidence:
                 continue
             if per_symbol_count.get(symbol, 0) >= resolved_config.max_signals_per_symbol:
                 continue
 
             payload = signal.as_payload()
+            payload["confidence"] = adjusted_confidence
+            if news_count:
+                tone = "positive" if news_sentiment > 0.05 else "negative" if news_sentiment < -0.05 else "neutral"
+                alignment = "aligned with" if news_sentiment * direction > 0.05 else "conflicted with" if news_sentiment * direction < -0.05 else "did not materially affect"
+                payload["rationale"] = (
+                    f"{signal.rationale} Recent news context: {tone} sentiment {alignment} "
+                    f"the {signal.signal} signal across {news_count} item(s); confidence adjustment "
+                    f"{confidence_adjustment:+.3f}."
+                )
             payload["horizon"] = signal.horizon
             payload["created_at"] = resolved_now.isoformat()
+            with sqlite3.connect(db_path) as connection:
+                duplicate = connection.execute(
+                    "SELECT 1 FROM signals WHERE symbol = ? AND signal = ? "
+                    "AND confidence = ? AND horizon = ? AND rationale = ? "
+                    "AND model_name = ? AND prompt_version = ? "
+                    "AND price_at_signal IS ? AND date(created_at) = ? LIMIT 1",
+                    (
+                        payload["symbol"],
+                        payload["signal"],
+                        payload["confidence"],
+                        payload["horizon"],
+                        payload["rationale"],
+                        payload["model_name"],
+                        payload["prompt_version"],
+                        payload["price_at_signal"],
+                        resolved_now.date().isoformat(),
+                    ),
+                ).fetchone()
+            if duplicate is not None:
+                continue
             signal_id = insert_signal(
                 db_path,
                 item_id=None,

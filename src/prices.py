@@ -1,11 +1,22 @@
 import csv
 import math
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
 
 
+@dataclass(frozen=True)
+class Quote:
+    price: float
+    timestamp: datetime
+
+
 class PriceProvider(Protocol):
+    def get_quote(self, symbol: str, when: datetime) -> Quote | None:
+        """Return the latest quote no later than when."""
+        ...
+
     def get_price(self, symbol: str, when: datetime) -> float | None:
         """Return the latest known price no later than when."""
         ...
@@ -40,13 +51,17 @@ class CsvPriceProvider:
     def latest_timestamp(self) -> datetime | None:
         return max((quotes[-1][0] for quotes in self._prices.values() if quotes), default=None)
 
-    def get_price(self, symbol: str, when: datetime) -> float | None:
+    def get_quote(self, symbol: str, when: datetime) -> Quote | None:
         if when.tzinfo is None or when.utcoffset() is None:
             raise ValueError("when must be a timezone-aware datetime")
         target = when.astimezone(timezone.utc)
-        last_price = None
+        last_quote = None
         for timestamp, price in self._prices.get(symbol, ()):
             if timestamp > target:
                 break
-            last_price = price
-        return last_price
+            last_quote = Quote(price, timestamp)
+        return last_quote
+
+    def get_price(self, symbol: str, when: datetime) -> float | None:
+        quote = self.get_quote(symbol, when)
+        return None if quote is None else quote.price

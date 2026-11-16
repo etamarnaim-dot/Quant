@@ -13,6 +13,7 @@ from .report import summarize_confidence_outcomes
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "research.db"
+DEFAULT_PRICE_PATH = PROJECT_ROOT / "data" / "prices.csv"
 KILL_SWITCH_PATH = PROJECT_ROOT / "KILL"
 
 LATEST_SIGNAL_COLUMNS = [

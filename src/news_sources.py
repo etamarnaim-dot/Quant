@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import email.utils
 import os
+import re
+import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 from urllib import error, request
+from urllib.parse import urlencode
+from xml.etree import ElementTree
 
 from dotenv import load_dotenv
 
@@ -110,6 +115,195 @@ class FinnhubNewsSource(NewsSource):
         return items
 
 
+_IMPORTANT_8K_ITEMS = {"1.03", "1.05", "2.02", "2.04", "2.06", "3.01", "4.02", "5.01", "5.02"}
+_8K_ITEM_LABELS = {
+    "1.03": "bankruptcy",
+    "1.05": "cybersecurity incident",
+    "2.02": "earnings results",
+    "2.04": "debt default or acceleration",
+    "2.06": "impairment",
+    "3.01": "delisting notice",
+    "4.02": "past financials no longer reliable",
+    "5.01": "change in control",
+    "5.02": "officer or director change",
+}
+
+
+def _feed_datetime(value: str) -> str | None:
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        parsed = email.utils.parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError):
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def parse_yahoo_rss(payload: bytes | str, symbol: str) -> list[dict[str, object]]:
+    root = ElementTree.fromstring(payload)
+    articles: list[dict[str, object]] = []
+    for item in root.iter("item"):
+        def text(name: str) -> str:
+            element = item.find(name)
+            return "" if element is None or element.text is None else element.text.strip()
+
+        title = text("title")
+        if not title:
+            continue
+        published_at = _feed_datetime(text("pubDate"))
+        articles.append(
+            {
+                "source": "Yahoo Finance",
+                "title": title,
+                "content": text("description") or title,
+                "published_at": published_at,
+                "url": text("link"),
+                "symbols": [symbol.upper()],
+                "symbol": symbol.upper(),
+                "external_id": text("guid"),
+                "kind": "headline",
+            }
+        )
+    return articles
+
+
+def parse_sec_atom(payload: bytes | str, symbol: str) -> list[dict[str, object]]:
+    root = ElementTree.fromstring(payload)
+
+    def local_name(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1]
+
+    articles: list[dict[str, object]] = []
+    for entry in root.iter():
+        if local_name(entry.tag) != "entry":
+            continue
+        fields = {
+            local_name(element.tag): (element.text or "").strip()
+            for element in entry.iter()
+            if element is not entry
+        }
+        form = fields.get("filing-type", "filing")
+        item_codes = sorted(set(re.findall(r"\d+\.\d+", fields.get("items-desc", ""))))
+        labels = [_8K_ITEM_LABELS.get(code, f"item {code}") for code in item_codes]
+        title = f"{symbol.upper()} filed a {form}"
+        if labels:
+            title += ": " + ", ".join(labels)
+        important = bool(_IMPORTANT_8K_ITEMS.intersection(item_codes))
+        if important:
+            title = "! " + title
+        link = next(
+            (element.get("href", "") for element in entry.iter() if local_name(element.tag) == "link"),
+            "",
+        )
+        articles.append(
+            {
+                "source": "SEC EDGAR",
+                "title": title,
+                "content": fields.get("form-name") or title,
+                "published_at": _feed_datetime(fields.get("updated", "")),
+                "url": link,
+                "symbols": [symbol.upper()],
+                "symbol": symbol.upper(),
+                "external_id": fields.get("accession-number", ""),
+                "kind": "filing",
+                "form": form,
+                "items": item_codes,
+                "important": important,
+            }
+        )
+    return articles
+
+
+class PublicFeedNewsSource(NewsSource):
+    def __init__(
+        self,
+        symbols: Iterable[str],
+        *,
+        sec_user_agent: str | None = None,
+        timeout: float = 15,
+    ) -> None:
+        self.symbols = tuple(dict.fromkeys(str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()))
+        candidate_user_agent = sec_user_agent or os.getenv("SEC_USER_AGENT")
+        self.sec_user_agent = (
+            candidate_user_agent
+            if candidate_user_agent and "@" in candidate_user_agent and "you@example.com" not in candidate_user_agent
+            else None
+        )
+        self.timeout = timeout
+        self._last_sec_request = 0.0
+
+    def _fetch(self, url: str, *, user_agent: str) -> bytes:
+        req = request.Request(url, headers={"User-Agent": user_agent})
+        with request.urlopen(req, timeout=self.timeout) as response:
+            return response.read()
+
+    def _fetch_sec_url(self, url: str) -> bytes:
+        if self._last_sec_request:
+            elapsed = time.monotonic() - self._last_sec_request
+            if elapsed < 0.15:
+                time.sleep(0.15 - elapsed)
+        self._last_sec_request = time.monotonic()
+        return self._fetch(url, user_agent=self.sec_user_agent or "")
+
+    def _fetch_sec(self, symbol: str, cik: str) -> bytes:
+        query = urlencode(
+            {
+                "action": "getcompany",
+                "CIK": cik,
+                "type": "8-K",
+                "dateb": "",
+                "owner": "include",
+                "count": 10,
+                "output": "atom",
+            }
+        )
+        return self._fetch_sec_url("https://www.sec.gov/cgi-bin/browse-edgar?" + query)
+
+    def fetch_articles(self) -> list[dict[str, object]]:
+        articles: list[dict[str, object]] = []
+        cik_by_symbol: dict[str, str] | None = None
+        for symbol in self.symbols:
+            yahoo_url = "https://feeds.finance.yahoo.com/rss/2.0/headline?" + urlencode(
+                {"s": symbol, "region": "US", "lang": "en-US"}
+            )
+            try:
+                articles.extend(
+                    parse_yahoo_rss(
+                        self._fetch(yahoo_url, user_agent="QuantResearch/1.0"),
+                        symbol,
+                    )
+                )
+            except (error.URLError, ElementTree.ParseError, ValueError, TimeoutError):
+                pass
+
+            if self.sec_user_agent:
+                try:
+                    if cik_by_symbol is None:
+                        payload = self._fetch_sec_url(
+                            "https://www.sec.gov/files/company_tickers.json"
+                        )
+                        records = json.loads(payload.decode("utf-8"))
+                        if isinstance(records, dict):
+                            records = records.values()
+                        cik_by_symbol = {
+                            str(record["ticker"]).upper(): str(record["cik_str"]).zfill(10)
+                            for record in records
+                            if isinstance(record, dict) and record.get("ticker") and record.get("cik_str")
+                        }
+                    cik = cik_by_symbol.get(symbol)
+                    if cik:
+                        articles.extend(parse_sec_atom(self._fetch_sec(symbol, cik), symbol))
+                except (error.URLError, ElementTree.ParseError, ValueError, TimeoutError, KeyError):
+                    cik_by_symbol = cik_by_symbol or {}
+        return articles
+
+
 class FeedRegistry:
     def __init__(self, sources: Iterable[NewsSource] | None = None) -> None:
         self._sources: list[NewsSource] = list(sources or ())
@@ -134,6 +328,9 @@ def build_default_news_sources(symbols: Iterable[str] | None = None) -> FeedRegi
     api_key = os.getenv("FINNHUB_API_KEY")
     if api_key:
         sources.append(FinnhubNewsSource(api_key=api_key, symbols=configured_symbols))
+
+    if configured_symbols:
+        sources.append(PublicFeedNewsSource(configured_symbols))
 
     fallback_path = Path(__file__).resolve().parents[1] / "data" / "samples" / "news.json"
     if fallback_path.exists():

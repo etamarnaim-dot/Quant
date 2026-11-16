@@ -1,21 +1,31 @@
 from __future__ import annotations
 
 import hashlib
+from sqlite3 import Row, connect
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from .db import DatabasePath, create_tables, fetch_news_events, insert_news_event, insert_raw_item
+from .db import DatabasePath, create_tables, insert_news_event, insert_raw_item
 from .news_sources import build_default_news_sources
 
 
 def _normalize_datetime(value: str | None) -> str:
-    if value is None:
+    if value is None or not value.strip():
         return datetime.now(timezone.utc).isoformat()
     text = value.strip()
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
-    dt = datetime.fromisoformat(text)
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            timestamp = float(text)
+            if abs(timestamp) >= 1_000_000_000_000:
+                timestamp /= 1000.0
+            return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+        except (ValueError, OverflowError, OSError):
+            raise ValueError(f"invalid news publication timestamp: {value!r}") from None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat()
@@ -96,12 +106,13 @@ def normalize_news_item(article: dict[str, object]) -> dict[str, object]:
     quality = min(1.0, 0.65 + (0.15 if article.get("source") else 0.0))
     summary = content[:280] if content else title
 
+    published_at = article.get("published_at") or article.get("published")
     return {
         "source": str(article.get("source") or "unknown"),
         "title": title,
         "content": content,
         "summary": summary,
-        "published_at": _normalize_datetime(str(article.get("published_at") or article.get("published") or "")),
+        "published_at": _normalize_datetime(None if published_at is None else str(published_at)),
         "url": str(article.get("url") or article.get("link") or ""),
         "symbols": symbol_list,
         "event_type": event_type,
@@ -119,14 +130,16 @@ def ingest_news_articles(
     path.parent.mkdir(parents=True, exist_ok=True)
     create_tables(path)
 
-    seen_keys: set[str] = set()
-    with path.open("r", encoding="utf-8", errors="ignore") as _:
-        pass
-
-    existing = fetch_news_events(path)
-    for row in existing:
-        if "source" in row and "title" in row:
-            seen_keys.add(f"source:{row['source']}|title:{row['title']}")
+    seen_keys = {
+        _dedupe_key(
+            {
+                "url": row.get("url"),
+                "title": row.get("title"),
+                "content": row.get("text"),
+            }
+        )
+        for row in fetch_news_items(path)
+    }
 
     inserted: list[dict[str, object]] = []
     for article in articles:
@@ -181,8 +194,8 @@ def fetch_news_items(db_path: DatabasePath, *, limit: int | None = None) -> list
     query = "SELECT * FROM raw_items ORDER BY id DESC"
     if limit is not None:
         query += " LIMIT ?"
-    from sqlite3 import connect
     connection = connect(db_path)
+    connection.row_factory = Row
     try:
         rows = connection.execute(query, ((limit,) if limit is not None else ())).fetchall()
     finally:

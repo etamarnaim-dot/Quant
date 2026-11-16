@@ -35,6 +35,7 @@ def process_signal(
     config: RiskConfig,
     now: datetime,
     *,
+    price_timestamp: datetime,
     db_path: DatabasePath = "data/research.db",
 ) -> SimOrder | None:
     try:
@@ -50,7 +51,7 @@ def process_signal(
             logger.info("HOLD signal %s logged; no order submitted", signal_id)
             return None
 
-        trade = ProposedTrade(symbol, signal_type, price, confidence, now)
+        trade = ProposedTrade(symbol, signal_type, price, confidence, price_timestamp)
         create_tables(db_path)
         client_order_id = f"signal-{signal_id}"
         if KILL_SWITCH_PATH.exists():

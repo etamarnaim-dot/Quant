@@ -1,6 +1,6 @@
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -16,6 +16,13 @@ NOW = datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc)
 class StaticPrices:
     def get_price(self, symbol, when):
         return 100.0 if symbol == "ACME" else None
+
+    def get_quote(self, symbol, when):
+        from src.prices import Quote
+
+        if symbol != "ACME":
+            return None
+        return Quote(100.0, NOW)
 
 
 class RecordingBroker(SimBroker):
@@ -71,7 +78,7 @@ def test_hold_logs_and_does_not_submit(tmp_path, caplog):
     broker = RecordingBroker()
 
     with caplog.at_level(logging.INFO, logger="src.executor"):
-        result = process_signal(signal, 100.0, broker, _risk_config(), NOW, db_path=db_path)
+        result = process_signal(signal, 100.0, broker, _risk_config(), NOW, price_timestamp=NOW, db_path=db_path)
 
     assert result is None
     assert broker.submissions == []
@@ -84,7 +91,7 @@ def test_rejected_trade_is_logged_without_submission(tmp_path):
     signal = _signal(db_path)
     broker = RecordingBroker()
 
-    result = process_signal(signal, 100.0, broker, RiskConfig(), NOW, db_path=db_path)
+    result = process_signal(signal, 100.0, broker, RiskConfig(), NOW, price_timestamp=NOW, db_path=db_path)
 
     assert result is None
     assert broker.submissions == []
@@ -105,8 +112,8 @@ def test_approved_trade_submits_risk_quantity_and_is_idempotent(tmp_path):
         NOW,
     ).qty
 
-    first = process_signal(signal, 100.0, broker, config, NOW, db_path=db_path)
-    second = process_signal(signal, 100.0, broker, config, NOW, db_path=db_path)
+    first = process_signal(signal, 100.0, broker, config, NOW, price_timestamp=NOW, db_path=db_path)
+    second = process_signal(signal, 100.0, broker, config, NOW, price_timestamp=NOW, db_path=db_path)
 
     assert first is not None
     assert first.qty == expected
@@ -125,7 +132,7 @@ def test_kill_switch_blocks_and_logs(tmp_path, monkeypatch):
     kill_path.write_text("", encoding="utf-8")
     monkeypatch.setattr("src.executor.KILL_SWITCH_PATH", kill_path)
 
-    result = process_signal(signal, 100.0, broker, _risk_config(), NOW, db_path=db_path)
+    result = process_signal(signal, 100.0, broker, _risk_config(), NOW, price_timestamp=NOW, db_path=db_path)
 
     assert result is None
     assert broker.submissions == []
@@ -141,7 +148,7 @@ def test_broker_error_is_logged_without_order(tmp_path, caplog):
     broker = FailingBroker()
 
     with caplog.at_level(logging.ERROR, logger="src.executor"):
-        result = process_signal(signal, 100.0, broker, _risk_config(), NOW, db_path=db_path)
+        result = process_signal(signal, 100.0, broker, _risk_config(), NOW, price_timestamp=NOW, db_path=db_path)
 
     assert result is None
     assert "simulated broker failure" in caplog.text
@@ -168,3 +175,94 @@ def test_insufficient_cash_rejects_order_without_changing_account():
     assert order.fill_price is None
     assert broker.get_account().cash == 10_000.0
     assert broker.get_positions() == {}
+
+
+def test_stale_price_timestamp_rejects_signal_and_logs_stale_data(tmp_path, caplog):
+    db_path = tmp_path / "research.db"
+    signal = _signal(db_path)
+    broker = RecordingBroker()
+    stale_timestamp = NOW - timedelta(minutes=5)
+
+    with caplog.at_level(logging.INFO, logger="src.executor"):
+        result = process_signal(
+            signal,
+            100.0,
+            broker,
+            _risk_config(),
+            NOW,
+            price_timestamp=stale_timestamp,
+            db_path=db_path,
+        )
+
+    assert result is None
+    assert broker.submissions == []
+    assert "stale" in caplog.text.lower()
+
+
+def test_fresh_price_timestamp_still_trades(tmp_path):
+    db_path = tmp_path / "research.db"
+    signal = _signal(db_path)
+    broker = RecordingBroker()
+
+    result = process_signal(
+        signal,
+        100.0,
+        broker,
+        _risk_config(),
+        NOW,
+        price_timestamp=NOW,
+        db_path=db_path,
+    )
+
+    assert result is not None
+    assert result.status == "filled"
+
+
+def test_future_price_timestamp_is_rejected(tmp_path, caplog):
+    db_path = tmp_path / "research.db"
+    signal = _signal(db_path)
+    broker = RecordingBroker()
+
+    with caplog.at_level(logging.INFO, logger="src.executor"):
+        result = process_signal(
+            signal,
+            100.0,
+            broker,
+            _risk_config(),
+            NOW,
+            price_timestamp=NOW + timedelta(seconds=1),
+            db_path=db_path,
+        )
+
+    assert result is None
+    assert broker.submissions == []
+    assert "future" in caplog.text.lower()
+
+
+@pytest.mark.parametrize(
+    ("quote_timestamp", "expected_status"),
+    [
+        (NOW - timedelta(minutes=5), "rejected"),
+        (NOW, "filled"),
+    ],
+)
+def test_broker_enforces_max_quote_age_at_fill(quote_timestamp, expected_status):
+    from src.prices import Quote
+
+    class QuotePrices:
+        def get_quote(self, symbol, when):
+            return Quote(100.0, quote_timestamp) if symbol == "ACME" else None
+
+        def get_price(self, symbol, when):
+            quote = self.get_quote(symbol, when)
+            return None if quote is None else quote.price
+
+    broker = SimBroker(
+        QuotePrices(),
+        clock=lambda: NOW,
+        max_quote_age_seconds=60,
+    )
+
+    order = broker.submit_order("ACME", "BUY", 1, f"quote-{expected_status}")
+
+    assert order.status == expected_status
